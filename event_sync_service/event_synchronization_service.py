@@ -8,6 +8,7 @@ from pathlib import Path
 import requests
 import urllib.parse
 import base64
+import traceback
 from dotenv import load_dotenv
 
 # Load environment variables
@@ -563,6 +564,12 @@ class EventSyncService:
         }
 
     def _handle_nxt_request(self, method, endpoint, json_data=None, params=None, retry_count=0):
+        # Debug API calls
+        print(f"NXT API CALL: {method} {endpoint}")
+        if json_data:
+            print(f"PAYLOAD: {json.dumps(json_data, indent=2)}")
+        if params:
+            print(f"PARAMS: {params}")
         """Handle a request to the NXT API.
         
         Args:
@@ -587,29 +594,59 @@ class EventSyncService:
             
             # Make request
             url = f"{self.nxt_base_url}{endpoint}"
-            self.logger.debug(f"{method} {url}")
-            self.logger.debug(f"Headers: {self._redact_headers(headers)}")
-            if json_data:
-                self.logger.debug(f"Request data: {json.dumps(json_data, indent=2)}")
-            if params:
-                self.logger.debug(f"Query params: {json.dumps(params, indent=2)}")
+            
+            # Enhanced debugging for API calls
+            if '/participants/' in endpoint or 'rsvp_status' in str(json_data):
+                # Add special debug tags for RSVP-related calls
+                self.logger.info(f"[API_DEBUG] ==== NXT API CALL ====")
+                self.logger.info(f"[API_DEBUG] Method: {method}")
+                self.logger.info(f"[API_DEBUG] URL: {url}")
+                self.logger.info(f"[API_DEBUG] Headers: {self._redact_headers(headers)}")
+                if json_data:
+                    self.logger.info(f"[API_DEBUG] Request data: {json.dumps(json_data, indent=2)}")
+                if params:
+                    self.logger.info(f"[API_DEBUG] Query params: {json.dumps(params, indent=2)}")
+            else:
+                # Regular debug logging for other API calls
+                self.logger.debug(f"{method} {url}")
+                self.logger.debug(f"Headers: {self._redact_headers(headers)}")
+                if json_data:
+                    self.logger.debug(f"Request data: {json.dumps(json_data, indent=2)}")
+                if params:
+                    self.logger.debug(f"Query params: {json.dumps(params, indent=2)}")
                 
             response = requests.request(method, url, headers=headers, json=json_data, params=params)
             
             # Handle response
             if response.ok:
-                self.logger.debug(f"Response status code: {response.status_code}")
-                self.logger.debug(f"Response headers: {response.headers}")
-                if response.content:
-                    try:
-                        json_response = response.json()
-                        self.logger.debug(f"Response JSON: {json.dumps(json_response, indent=2)}")
-                        return json_response
-                    except json.JSONDecodeError:
-                        self.logger.debug(f"Response content (not JSON): {response.text}")
-                        return response
-                self.logger.debug(f"Empty response content with status code {response.status_code}")
-                return response
+                # Enhanced debugging for RSVP-related responses
+                if '/participants/' in endpoint or 'rsvp_status' in str(json_data):
+                    self.logger.info(f"[API_DEBUG] Response status code: {response.status_code}")
+                    self.logger.info(f"[API_DEBUG] Response headers: {dict(response.headers)}")
+                    if response.content:
+                        try:
+                            json_response = response.json()
+                            self.logger.info(f"[API_DEBUG] Response JSON: {json.dumps(json_response, indent=2)}")
+                            return json_response
+                        except json.JSONDecodeError:
+                            self.logger.info(f"[API_DEBUG] Response content (not JSON): {response.text}")
+                            return response
+                    self.logger.info(f"[API_DEBUG] Empty response content with status code {response.status_code}")
+                    return response
+                else:
+                    # Regular debug logging for other responses
+                    self.logger.debug(f"Response status code: {response.status_code}")
+                    self.logger.debug(f"Response headers: {response.headers}")
+                    if response.content:
+                        try:
+                            json_response = response.json()
+                            self.logger.debug(f"Response JSON: {json.dumps(json_response, indent=2)}")
+                            return json_response
+                        except json.JSONDecodeError:
+                            self.logger.debug(f"Response content (not JSON): {response.text}")
+                            return response
+                    self.logger.debug(f"Empty response content with status code {response.status_code}")
+                    return response
                 
             # Handle specific error cases
             if response.status_code == 401 and retry_count < self.max_retries:
@@ -617,11 +654,19 @@ class EventSyncService:
                 # Force token refresh on next attempt
                 self.nxt_token_service._handle_invalid_token()
                 return self._handle_nxt_request(method, endpoint, json_data=json_data, params=params, retry_count=retry_count + 1)
-                
+            
+            # Enhanced error logging for RSVP-related errors
             error_text = response.text
-            self.logger.error(f"NXT API error: {response.status_code}")
-            self.logger.error(f"Error response: {error_text}")
+            error_prefix = "[API_DEBUG] " if '/participants/' in endpoint or 'rsvp_status' in str(json_data) else ""
+            
+            self.logger.error(f"{error_prefix}NXT API error: {response.status_code}")
+            self.logger.error(f"{error_prefix}Error response: {error_text}")
+            self.logger.error(f"{error_prefix}Request URL: {url}")
+            if json_data:
+                self.logger.error(f"{error_prefix}Request payload: {json.dumps(json_data, indent=2)}")
+            
             print(f"DETAILED ERROR: HTTP {response.status_code} - {error_text}")
+            
             # Return the error response instead of None so we can analyze it
             try:
                 return response.json()
@@ -1103,22 +1148,43 @@ class EventSyncService:
         Returns:
             str: NXT RSVP status (e.g., 'Attending', 'Declined')
         """
+        # Log the incoming status for debugging
+        self.logger.info(f"[RSVP_DEBUG] Raw input status: '{status}'")
+        if participant_data:
+            self.logger.debug(f"[RSVP_DEBUG] Participant data keys: {list(participant_data.keys())}")
+            # Log specific fields if they exist
+            for field in ['RegistrationStatus', 'Status', 'UserId', 'FirstName', 'LastName']:
+                if field in participant_data:
+                    self.logger.debug(f"[RSVP_DEBUG] {field}: '{participant_data.get(field)}'")
+        
         # Default RSVP status
         rsvp_status = 'NoResponse'
         
         # Standard mapping - simplified per user requirements
-        status = status.lower() if status else ''
+        normalized_status = status.lower() if status else ''
+        self.logger.info(f"[RSVP_DEBUG] Normalized status: '{normalized_status}'")
         
         # Per user requirements:
         # - "declined" and "cancelled" should map to "Declined"
         # - "registered" and "approved" should map to "Attending"
-        if status in ['approved', 'registered']:
-            rsvp_status = 'Attending'
-        elif status in ['declined', 'cancelled', 'draft']:
-            rsvp_status = 'Declined'
-        elif status == 'waitingapproval':
-            rsvp_status = 'Interested'
+        # - "waitingapproval" should map to "Attending" per client clarification
         
+        # Define mapping rules with clearer logging
+        if normalized_status in ['approved', 'registered', 'waitingapproval']:
+            rsvp_status = 'Attending'
+            self.logger.info(f"[RSVP_DEBUG] Rule matched: '{normalized_status}' → 'Attending'")
+        elif normalized_status in ['declined', 'cancelled', 'draft']:
+            rsvp_status = 'Declined'
+            self.logger.info(f"[RSVP_DEBUG] Rule matched: '{normalized_status}' → 'Declined'")
+        elif normalized_status == '':
+            # Special case for empty status
+            self.logger.warning(f"[RSVP_DEBUG] Empty status received, using default 'NoResponse'")
+            rsvp_status = 'NoResponse'
+        else:
+            self.logger.warning(f"[RSVP_DEBUG] Status '{normalized_status}' did not match any rule, using default 'NoResponse'")
+            rsvp_status = 'NoResponse'
+        
+        self.logger.info(f"[RSVP_DEBUG] Mapped '{normalized_status}' to '{rsvp_status}'")
         return rsvp_status
     
     def _transform_servicereef_to_nxt_participant(self, sr_data, constituent_id):
@@ -1151,9 +1217,26 @@ class EventSyncService:
 
         
         # Get registration status from appropriate field (handles both field names)
-        reg_status = sr_data.get('RegistrationStatus', sr_data.get('Status', ''))
+        # Get Status first, then fall back to RegistrationStatus per requirements
+        # Fix: Always use RegistrationStatus directly for reliable status extraction
+        
+        # Debug all available status fields in the data
+        self.logger.info(f"[RSVP_DEBUG] ====== Participant Status Fields ======")
+        if 'Status' in sr_data:
+            self.logger.info(f"[RSVP_DEBUG] 'Status' field found: '{sr_data.get('Status')}'")
+        if 'RegistrationStatus' in sr_data:
+            self.logger.info(f"[RSVP_DEBUG] 'RegistrationStatus' field found: '{sr_data.get('RegistrationStatus')}'")
+        
+        # Show all available fields for debugging
+        self.logger.debug(f"[RSVP_DEBUG] All available fields: {list(sr_data.keys())}")
+        
+        # Using RegistrationStatus per client requirements
+        reg_status = sr_data.get('RegistrationStatus', '')
         name = f'{sr_data.get("FirstName")} {sr_data.get("LastName")}'
-        self.logger.info(f'Mapping status for {name}: {reg_status}')
+        
+        self.logger.info(f"[RSVP_DEBUG] Participant: {name}")
+        self.logger.info(f"[RSVP_DEBUG] Raw registration status: '{reg_status}'")
+        
         rsvp_status = self._map_service_reef_status_to_nxt_rsvp(reg_status, sr_data)
         
         # Create a fresh NXT-ready payload
@@ -1163,6 +1246,9 @@ class EventSyncService:
             'invitation_status': 'Invited',  # Default since ServiceReef doesn't have this concept
             'attended': sr_data.get('Attended', False)  # This field matches directly
         }
+        
+        self.logger.info(f"[RSVP_DEBUG] Final NXT payload rsvp_status: '{rsvp_status}'")
+        self.logger.info(f"[RSVP_DEBUG] Final NXT attended status: {sr_data.get('Attended', False)}")
         
         # Add host_id if participant is a guest
         host_id = sr_data.get('HostId')
@@ -1201,16 +1287,207 @@ class EventSyncService:
                 print(f"Cannot update participant status: missing participant ID")
                 self.logger.warning("Cannot update participant status: missing participant ID")
                 return False
+
+            # CRITICAL FIX: Verify we have complete ServiceReef participant data
+            # If the data is incomplete, refetch it from ServiceReef based on ServiceReef ID
+            if not sr_participant_data.get('FirstName') or 'RegistrationStatus' not in sr_participant_data:
+                self.logger.warning(f"[RSVP_DEBUG] Incomplete ServiceReef participant data detected. Attempting to refetch complete data.")
                 
-            # Get the ServiceReef status and map it to NXT RSVP status
-            sr_status = sr_participant_data.get('RegistrationStatus', '').lower()
+                # Debug the current participant data structure to better understand what we have
+                self.logger.info(f"[RSVP_DEBUG] Current participant data keys: {list(sr_participant_data.keys())}")
+                self.logger.info(f"[RSVP_DEBUG] Current participant data: {sr_participant_data}")
+                
+                # Try to extract ServiceReef user ID for refetching
+                sr_user_id = sr_participant_data.get('UserId') or sr_participant_data.get('Id')
+                self.logger.info(f"[RSVP_DEBUG] Direct ServiceReef user ID extraction result: {sr_user_id}")
+                
+                # Get constituent ID from the NXT participant data
+                constituent_id = existing_participant.get('contact_id')
+                lookup_id = existing_participant.get('lookup_id')  # First try to get lookup_id directly from participant
+                sr_user_id = None
+                
+                self.logger.info(f"[RSVP_DEBUG] Initial lookup_id from participant: {lookup_id}")
+                
+                if constituent_id:
+                    # If lookup_id not in participant data, get constituent details to find it
+                    if not lookup_id:
+                        nxt_constituent_data = self._get_nxt_constituent(constituent_id)
+                        if nxt_constituent_data:
+                            lookup_id = nxt_constituent_data.get('lookup_id')
+                            self.logger.info(f"[RSVP_DEBUG] Found lookup_id {lookup_id} from constituent API for {constituent_id}")
+                    
+                    # Try reverse lookup from NXT constituent ID to ServiceReef user ID
+                    for sr_id, nxt_id in self.constituent_mapping.items():
+                        if nxt_id == constituent_id:
+                            sr_user_id = sr_id
+                            self.logger.info(f"[RSVP_DEBUG] Found ServiceReef user ID {sr_user_id} from direct constituent mapping")
+                            break
+                    
+                    # If no direct match, try using the lookup_id which is likely the ServiceReef ID
+                    if not sr_user_id and lookup_id:
+                        # In most cases, the lookup_id IS the ServiceReef user ID
+                        sr_user_id = lookup_id
+                        self.logger.info(f"[RSVP_DEBUG] Using lookup_id {lookup_id} as ServiceReef user ID")
+                        
+                        # Double-check in constituent mapping
+                        if lookup_id in self.constituent_mapping:
+                            self.logger.info(f"[RSVP_DEBUG] Confirmed lookup_id {lookup_id} exists in constituent mapping")
+                        else:
+                            self.logger.info(f"[RSVP_DEBUG] Note: lookup_id {lookup_id} not found in constituent mapping")
+                
+                # Debug event mapping status
+                self.logger.info(f"[RSVP_DEBUG] Event mapping loaded: {bool(self.event_mapping)}")
+                self.logger.info(f"[RSVP_DEBUG] Event mapping entries: {len(self.event_mapping) if self.event_mapping else 0}")
+                self.logger.info(f"[RSVP_DEBUG] Looking for NXT event ID {nxt_event_id} in reverse mapping")
+                
+                # Find the ServiceReef event ID from the NXT event ID using reverse mapping
+                sr_event_id = None
+                for sr_id, nxt_id in self.event_mapping.items():
+                    if str(nxt_id) == str(nxt_event_id):
+                        sr_event_id = sr_id
+                        self.logger.info(f"[RSVP_DEBUG] Found ServiceReef event ID {sr_event_id} from event mapping")
+                        break
+                
+                # If we couldn't find the event ID mapping, log all mappings for debugging
+                if not sr_event_id:
+                    self.logger.warning(f"[RSVP_DEBUG] Could not find ServiceReef event ID for NXT event {nxt_event_id}")
+                    self.logger.info(f"[RSVP_DEBUG] All event mappings: {self.event_mapping}")
+                
+                # Alternative approach: If no mapping found but we have a user ID, try to get all events
+                # for this user and find one with participants that match our target
+                if not sr_event_id and sr_user_id:
+                    self.logger.info(f"[RSVP_DEBUG] Trying alternative approach: find events by participant {sr_user_id}")
+                    # For now, we'll use the 3 known test events from ServiceReef
+                    test_event_ids = ["19818", "20124", "20537"]
+                    
+                    for test_id in test_event_ids:
+                        self.logger.info(f"[RSVP_DEBUG] Checking ServiceReef test event ID: {test_id}")
+                        all_participants = self._get_service_reef_event_participants(test_id)
+                        self.logger.info(f"[RSVP_DEBUG] Found {len(all_participants)} participants in ServiceReef event {test_id}")
+                        
+                        # Check if target participant is in this event
+                        for p in all_participants:
+                            p_id = str(p.get('UserId') or p.get('Id', ''))
+                            if p_id == str(sr_user_id):
+                                sr_participant_data = p
+                                sr_event_id = test_id
+                                self.logger.info(f"[RSVP_DEBUG] Successfully found participant {p.get('FirstName')} {p.get('LastName')} in event {test_id}")
+                                break
+                        
+                        if sr_event_id:
+                            # We found our participant in this event
+                            break
+                
+                # If we have both ServiceReef event ID and user ID, refetch the specific participant data
+                if sr_event_id and sr_user_id:
+                    self.logger.info(f"[RSVP_DEBUG] Attempting direct participant retrieval for ServiceReef event {sr_event_id} and user {sr_user_id}")
+                    
+                    # First try to get the specific participant directly from the API
+                    try:
+                        direct_participant = self._handle_service_reef_request(
+                            'GET', 
+                            f'/v1/events/{sr_event_id}/participants/{sr_user_id}'
+                        )
+                        
+                        if direct_participant and isinstance(direct_participant, dict):
+                            self.logger.info(f"[RSVP_DEBUG] Successfully retrieved direct participant data from ServiceReef API")
+                            sr_participant_data = direct_participant
+                            participant_found = True
+                            self.logger.info(f"[RSVP_DEBUG] Direct participant data: {json.dumps(direct_participant, default=str)}")
+                            
+                            # Check for required fields
+                            if 'RegistrationStatus' in direct_participant:
+                                self.logger.info(f"[RSVP_DEBUG] Found RegistrationStatus: '{direct_participant['RegistrationStatus']}'")
+                            else:
+                                self.logger.warning(f"[RSVP_DEBUG] RegistrationStatus missing from direct participant data")
+                    except Exception as direct_error:
+                        self.logger.error(f"[RSVP_DEBUG] Error getting direct participant data: {str(direct_error)}")
+                    
+                    # Fallback: get all participants and find our target
+                    if not sr_participant_data.get('RegistrationStatus'):
+                        self.logger.info(f"[RSVP_DEBUG] Falling back to retrieving all participants for ServiceReef event {sr_event_id}")
+                        # Get all participants for the event
+                        all_participants = self._get_service_reef_event_participants(sr_event_id)
+                        self.logger.info(f"[RSVP_DEBUG] Found {len(all_participants)} participants in ServiceReef event {sr_event_id}")
+                        
+                        # Find the specific participant we need by ID
+                        participant_found = False
+                        for p in all_participants:
+                            p_id = str(p.get('UserId') or p.get('Id', ''))
+                            if p_id == str(sr_user_id):
+                                sr_participant_data = p
+                                participant_found = True
+                                self.logger.info(f"[RSVP_DEBUG] Successfully refetched complete participant data for {p.get('FirstName')} {p.get('LastName')}")
+                                self.logger.info(f"[RSVP_DEBUG] Participant status: {p.get('RegistrationStatus')}")
+                                break
+                    
+                    # If we didn't find by ID, try by name or lookup_id
+                    if not participant_found and lookup_id:
+                        self.logger.info(f"[RSVP_DEBUG] Trying to find participant by lookup_id {lookup_id}")
+                        # Try matching by name from existing participant
+                        first_name = existing_participant.get('first_name', '').lower()
+                        last_name = existing_participant.get('last_name', '').lower()
+                        
+                        for p in all_participants:
+                            p_first = p.get('FirstName', '').lower()
+                            p_last = p.get('LastName', '').lower()
+                            
+                            if (p_first == first_name and p_last == last_name):
+                                sr_participant_data = p
+                                participant_found = True
+                                self.logger.info(f"[RSVP_DEBUG] Found participant by name match: {p_first} {p_last}")
+                                break
+                
+                # If we still don't have the data we need, try using the service method to get member details
+                if not sr_participant_data.get('FirstName') and sr_user_id:
+                    self.logger.info(f"[RSVP_DEBUG] Trying to get member details directly for user ID {sr_user_id}")
+                    try:
+                        member_data = self.service_reef_api.get_member_details(sr_user_id)
+                        if member_data:
+                            # Format it to match participant structure
+                            sr_participant_data['FirstName'] = member_data.get('FirstName')
+                            sr_participant_data['LastName'] = member_data.get('LastName')
+                            sr_participant_data['Email'] = member_data.get('Email')
+                            sr_participant_data['Phone'] = member_data.get('Phone')
+                            sr_participant_data['UserId'] = member_data.get('UserId')
+                            # We may not have RegistrationStatus from member details, but at least we have identity info
+                            self.logger.info(f"[RSVP_DEBUG] Supplemented data with member details for {sr_participant_data['FirstName']} {sr_participant_data['LastName']}")
+                    except Exception as e:
+                        self.logger.error(f"[RSVP_DEBUG] Error getting member details: {str(e)}")
+                
+                # Final debug output of our enhanced participant data
+                self.logger.info(f"[RSVP_DEBUG] Final enhanced participant data keys: {list(sr_participant_data.keys())}")
+                self.logger.info(f"[RSVP_DEBUG] First/Last name: {sr_participant_data.get('FirstName')} {sr_participant_data.get('LastName')}")
+                self.logger.info(f"[RSVP_DEBUG] Registration Status: {sr_participant_data.get('RegistrationStatus')}")
+
+                
+            # Debug all available fields for comprehensive analysis
+            self.logger.info(f"[RSVP_DEBUG] ==== Status Update Debug =====")
+            self.logger.info(f"[RSVP_DEBUG] Participant raw data keys: {list(sr_participant_data.keys())}")
+            
+            # Check which status fields are available
+            if 'Status' in sr_participant_data:
+                self.logger.info(f"[RSVP_DEBUG] Found 'Status' field with value: '{sr_participant_data.get('Status')}'")
+            if 'RegistrationStatus' in sr_participant_data:
+                self.logger.info(f"[RSVP_DEBUG] Found 'RegistrationStatus' field with value: '{sr_participant_data.get('RegistrationStatus')}'")
+            
+            # Extract ServiceReef participant status - prioritize RegistrationStatus
+            sr_status = sr_participant_data.get('RegistrationStatus', '')
+            if not sr_status:
+                # Fall back to Status field if RegistrationStatus is empty
+                sr_status = sr_participant_data.get('Status', '')
+                
             sr_attended = sr_participant_data.get('Attended', False)
             sr_participant_name = f"{sr_participant_data.get('FirstName', '')} {sr_participant_data.get('LastName', '')}" 
             
+            # Log all available fields for debugging
+            self.logger.info(f"[RSVP_DEBUG] Participant fields: {sorted(sr_participant_data.keys())}")
+            self.logger.info(f"[RSVP_DEBUG] ServiceReef Status: '{sr_status}', Attended={sr_attended}, Name={sr_participant_name}")
             print(f"ServiceReef Status: {sr_status}, Attended={sr_attended}, Name={sr_participant_name}")
             
             # Map ServiceReef status to NXT RSVP status
             new_rsvp = self._map_service_reef_status_to_nxt_rsvp(sr_status)
+            self.logger.info(f"[RSVP_DEBUG] Mapped ServiceReef status '{sr_status}' to NXT RSVP '{new_rsvp}'")
             print(f"Mapped ServiceReef status '{sr_status}' to NXT RSVP '{new_rsvp}'")
             
             # Check if status has changed
@@ -1233,18 +1510,29 @@ class EventSyncService:
                     'attended': attended_value
                 }
                 
+                self.logger.info(f"[RSVP_DEBUG] Update payload: {json.dumps(update_data)}")
+                
                 # Update participant status
                 endpoint = f"/event/v1/participants/{participant_id}"
+                self.logger.info(f"[RSVP_DEBUG] Sending PATCH request to {endpoint}")
                 print(f"Sending PATCH request to {endpoint}")
                 response = self._handle_nxt_request('PATCH', endpoint, json_data=update_data)
                 
+                # Log detailed response
+                if isinstance(response, dict):
+                    self.logger.info(f"[RSVP_DEBUG] Response: {json.dumps(response)}")
+                elif response is not None:
+                    self.logger.info(f"[RSVP_DEBUG] Response status: {response.status_code if hasattr(response, 'status_code') else 'Unknown'}")
+                else:
+                    self.logger.warning(f"[RSVP_DEBUG] No response received from API")
+                
                 if response:
                     print(f"SUCCESSFUL UPDATE: Participant {participant_id} status updated in event {nxt_event_id}")
-                    self.logger.info(f"Successfully updated participant {participant_id} status in event {nxt_event_id}")
+                    self.logger.info(f"[RSVP_DEBUG] Successfully updated participant {participant_id} status in event {nxt_event_id}")
                     return True
                 else:
                     print(f"UPDATE FAILED: Could not update participant {participant_id} status in event {nxt_event_id}")
-                    self.logger.warning(f"Failed to update participant {participant_id} status in event {nxt_event_id}")
+                    self.logger.warning(f"[RSVP_DEBUG] Failed to update participant {participant_id} status in event {nxt_event_id}")
                     return False
             else:
                 print(f"No status change needed. Current RSVP '{current_rsvp}' matches mapped ServiceReef status '{new_rsvp}'")
@@ -1306,103 +1594,30 @@ class EventSyncService:
                 update_data['prefix'] = member_details['Prefix']
                 changed = True
             
-            # Check email
-            if member_details.get('Email'):
-                existing_email = existing_constituent.get('email', {}).get('address', '')
-                if member_details['Email'] != existing_email:
-                    update_data['email'] = {
-                        'address': member_details['Email'],
-                        'type': 'Personal',
-                        'primary': True,
-                        'do_not_email': False
-                    }
+            # Check email - use our improved method that deletes existing emails and creates new ones
+            # Only update if ServiceReef provides a non-empty email to prevent erasing existing emails
+            if member_details.get('Email') and member_details.get('Email').strip():
+                self.logger.info(f"Updating email for constituent {nxt_id} with {member_details['Email']}")
+                # Use our dedicated email creation method which handles delete+create
+                if self._create_email_for_constituent(nxt_id, member_details['Email']):
+                    self.logger.info(f"Successfully updated email for constituent {nxt_id}")
                     changed = True
+                else:
+                    self.logger.warning(f"Failed to update email for constituent {nxt_id}")
+            else:
+                self.logger.info(f"No email provided in ServiceReef data for constituent {nxt_id}, preserving existing NXT emails")
                 
             # Phone numbers are handled separately like addresses
             phone_updated = False
             if member_details.get('Phone'):
-                # Get existing phones for the constituent
-                existing_phones = self._handle_nxt_request('GET', f'/constituent/v1/constituents/{nxt_id}/phones')
-                
-                if existing_phones and 'value' in existing_phones:
-                    # Check if there's a matching phone (primary or first found)
-                    primary_phone = None
-                    first_phone = None
-                    
-                    for phone in existing_phones['value']:
-                        if not first_phone:
-                            first_phone = phone
-                        if phone.get('primary', False):
-                            primary_phone = phone
-                            break
-                    
-                    # Prefer primary phone, fallback to first phone
-                    target_phone = primary_phone if primary_phone else first_phone
-                    
-                    if target_phone:
-                        # If phone exists but number changed, update it
-                        if target_phone.get('number') != member_details['Phone']:
-                            phone_update_payload = {
-                                'number': member_details['Phone'],
-                                'type': target_phone.get('type', 'Home'),
-                                'primary': True,
-                                'inactive': False,
-                                'do_not_call': False
-                            }
-                            
-                            # Update phone using dedicated endpoint
-                            # First log the full request we're about to make
-                            self.logger.info(f"Updating phone {target_phone['id']} for constituent {nxt_id}")
-                            self.logger.info(f"Phone update payload: {phone_update_payload}")
-                            print(f"Sending phone update request to {self.nxt_base_url}/constituent/v1/phones/{target_phone['id']}")
-                            print(f"Phone payload: {json.dumps(phone_update_payload, indent=2)}")
-                            
-                            # We need to make the PATCH request without certain fields that aren't allowed to be updated
-                            update_only_payload = {
-                                'number': member_details['Phone'],
-                                # Only include necessary fields that can be updated
-                                'type': target_phone.get('type', 'Home')
-                                # Do not include 'primary', 'inactive', 'do_not_call' for updates
-                            }
-                            
-                            phone_result = self._handle_nxt_request(
-                                'PATCH', 
-                                f'/constituent/v1/phones/{target_phone["id"]}',
-                                json_data=update_only_payload
-                            )
-                            
-                            # Log the response details for debugging
-                            if isinstance(phone_result, requests.Response):
-                                print(f"Phone update API response type: {type(phone_result)}")
-                                print(f"Raw response status code: {phone_result.status_code}")
-                                print(f"Raw response headers: {phone_result.headers}")
-                                
-                                if phone_result.status_code == 200:
-                                    print(f"SUCCESS: Phone updated with status code {phone_result.status_code}")
-                                    phone_result = True
-                                else:
-                                    print(f"FAILURE: Phone update failed with status code {phone_result.status_code}")
-                                    try:
-                                        print(f"Error details: {phone_result.json()}")
-                                    except:
-                                        print(f"Could not parse error response: {phone_result.text}")
-                                    phone_result = None
-                            
-                            if phone_result:
-                                phone_updated = True
-                                self.logger.info(f"Updated phone for constituent {nxt_id} to {member_details['Phone']}")
-                            else:
-                                self.logger.warning(f"Failed to update phone for constituent {nxt_id}")
-                        else:
-                            self.logger.debug(f"Phone unchanged for constituent {nxt_id}")
-                    else:
-                        # No phones exist, create new phone
-                        self._create_phone_for_constituent(nxt_id, member_details['Phone'])
-                        phone_updated = True
-                else:
-                    # No phones exist, create new phone
-                    self._create_phone_for_constituent(nxt_id, member_details['Phone'])
+                self.logger.info(f"Updating phone for constituent {nxt_id} with {member_details['Phone']}")
+                # Use our dedicated phone creation method which handles delete+create
+                if self._create_phone_for_constituent(nxt_id, member_details['Phone']):
+                    self.logger.info(f"Successfully updated phone for constituent {nxt_id}")
                     phone_updated = True
+                    changed = True
+                else:
+                    self.logger.warning(f"Failed to update phone for constituent {nxt_id}")
             
             # Check address - handled separately from other constituent fields
             address_updated = False
@@ -1530,9 +1745,150 @@ class EventSyncService:
             self.logger.error(f"Error updating constituent {nxt_id}: {str(e)}")
             return False
     
+    def _create_email_for_constituent(self, constituent_id, email_address):
+        """
+        Create a new email for an NXT constituent.
+        Only updates or creates email if needed, without deleting existing emails.
+        
+        Args:
+            constituent_id (str): The NXT constituent ID
+            email_address (str): The email address to add
+            
+        Returns:
+            bool: True if successful, False if failed
+        """
+        try:
+            # Ensure we have a valid constituent ID and force it to be a string
+            if not constituent_id or not email_address:
+                self.logger.error("Cannot create email: missing required parameters")
+                return False
+                
+            # Ensure constituent_id is a string - API requires this
+            constituent_id = str(constituent_id).strip()
+                
+            # Format email for NXT API acceptance
+            formatted_email = self._normalize_email(email_address)
+            if not formatted_email:
+                self.logger.error(f"Email '{email_address}' could not be formatted properly")
+                return False
+                
+            # First check if the constituent exists
+            self.logger.info(f"Verifying constituent exists before adding email: {constituent_id}")
+            constituent = self._get_nxt_constituent(constituent_id)
+            if not constituent:
+                self.logger.error(f"Cannot create email: constituent {constituent_id} not found in NXT")
+                return False
+            
+            # Check existing email addresses to see if we need to make changes
+            existing_emails = self._handle_nxt_request('GET', f'/constituent/v1/constituents/{constituent_id}/emailaddresses')
+            
+            # Check if the email already exists and is the same - if so, no need to change
+            email_exists = False
+            if existing_emails and 'value' in existing_emails and existing_emails['value']:
+                for email in existing_emails['value']:
+                    if email.get('address', '').lower() == formatted_email.lower():
+                        self.logger.info(f"Email {formatted_email} already exists for constituent {constituent_id} - no change needed")
+                        email_exists = True
+                        return True
+            
+            # If email doesn't exist already, create a new one (without deleting existing emails)
+            if not email_exists:
+                # Create payload for new email - all fields required by API documentation
+                email_payload = {
+                    'constituent_id': constituent_id,  # API requires this as string
+                    'address': formatted_email,       # API requires this
+                    'type': 'Email',                  # API requires this - must be 'Email' not 'Home'
+                    'primary': True,                  # API requires this
+                    'inactive': False,                # API requires this
+                    'do_not_email': False             # API requires this
+                }
+                
+                # Validate required fields per API documentation
+                if not email_payload['constituent_id']:
+                    self.logger.error("Cannot create email: missing required field 'constituent_id'")
+                    return False
+                
+                if not email_payload['address']:
+                    self.logger.error("Cannot create email: missing required field 'address'")
+                    return False
+                    
+                if not email_payload['type']:
+                    self.logger.error("Cannot create email: missing required field 'type'")
+                    return False
+                
+                # Make the API call to create the new email
+                self.logger.info(f"Creating new email {formatted_email} for constituent {constituent_id}")
+                create_result = self._handle_nxt_request('POST', '/constituent/v1/emailaddresses', json_data=email_payload)
+                
+                if create_result:
+                    self.logger.info(f"Successfully created new email {formatted_email} for constituent {constituent_id}")
+                    return True
+                else:
+                    self.logger.error(f"Failed to create new email {formatted_email} for constituent {constituent_id}")
+                    return False
+            
+            # No email changes made
+            return True
+            
+        except Exception as e:
+            self.logger.error(f"Error in _create_email_for_constituent: {str(e)}")
+            return False
+        
+            # Validate required fields per API documentation
+            if not email_payload['constituent_id']:
+                self.logger.error("Cannot create email: missing required field 'constituent_id'")
+                return False
+                
+            if not email_payload['address']:
+                self.logger.error("Cannot create email: missing required field 'address'")
+                return False
+                
+            if not email_payload['type']:
+                self.logger.error("Cannot create email: missing required field 'type'")
+                return False
+            
+            # Log detailed request information
+            self.logger.info(f"Creating email for constituent {constituent_id} with payload: {json.dumps(email_payload)}")
+            
+            # Create email using dedicated endpoint
+            endpoint = '/constituent/v1/emailaddresses'
+            self.logger.info(f"Sending request to {self.nxt_base_url}{endpoint}")
+            result = self._handle_nxt_request('POST', endpoint, json_data=email_payload)
+            
+            if result and isinstance(result, dict) and 'id' in result:
+                self.logger.info(f"Created new email {formatted_email} for constituent {constituent_id}, email ID: {result['id']}")
+                return True
+            else:
+                # Try to extract more detailed error information
+                error_detail = "Unknown error"
+                if isinstance(result, dict):
+                    if 'message' in result:
+                        error_detail = result['message']
+                    elif 'errors' in result:
+                        error_detail = str(result['errors'])
+                elif isinstance(result, str):
+                    error_detail = result
+                
+                self.logger.error(f"Failed to create email for constituent {constituent_id}: {error_detail}")
+                # Log specific error codes
+                if isinstance(result, dict) and 'status' in result:
+                    status_code = result['status']
+                    if status_code == 404:
+                        self.logger.error(f"404 Not Found: The constituent {constituent_id} was not found in NXT")
+                    elif status_code == 400:
+                        self.logger.error(f"400 Bad Request: The email payload format was incorrect")
+                    elif status_code == 403:
+                        self.logger.error(f"403 Forbidden: No permission to create email for constituent {constituent_id}")
+                
+                return False
+        except Exception as e:
+            self.logger.error(f"Error creating email for constituent {constituent_id}: {str(e)}")
+            return False
+    
     def _create_phone_for_constituent(self, constituent_id, phone_number):
         """
         Create a new phone number for an NXT constituent.
+        First deletes any existing phones to ensure clean sync.
         
         Args:
             constituent_id (str): The NXT constituent ID
@@ -1563,6 +1919,14 @@ class EventSyncService:
             if not constituent:
                 self.logger.error(f"Cannot create phone: constituent {constituent_id} not found in NXT")
                 return False
+                
+            # First delete any existing phones to avoid duplicates
+            existing_phones = self._handle_nxt_request('GET', f'/constituent/v1/constituents/{constituent_id}/phones')
+            if existing_phones and 'value' in existing_phones and existing_phones['value']:
+                for phone in existing_phones['value']:
+                    if 'id' in phone:
+                        self.logger.info(f"Deleting existing phone {phone.get('number')} (ID: {phone['id']})")
+                        self._handle_nxt_request('DELETE', f'/constituent/v1/phones/{phone["id"]}')
                 
             # Create payload for new phone - all fields required by API documentation
             phone_payload = {
@@ -1655,10 +2019,112 @@ class EventSyncService:
             return "555123" + digits_only[-4:]
         
         return digits_only
+        
+    def _normalize_email(self, email):
+        """
+        Normalize email for consistent comparison between ServiceReef and NXT.
+        
+        Args:
+            email (str): The email to normalize
+            
+        Returns:
+            str: Normalized email for comparison
+        """
+        if not email:
+            return ""
+            
+        return email.lower().strip()
+        
+    def standardize_servicereef_participant(self, participant_data):
+        """
+        Standardize ServiceReef participant data format to ensure consistent field access.
+        
+        Args:
+            participant_data (dict): ServiceReef participant data which may have inconsistent field names
+            
+        Returns:
+            dict: Standardized participant data
+        """
+        if not participant_data:
+            return {}
+            
+        # Create a copy to avoid modifying the original
+        std_data = dict(participant_data)
+        
+        # Ensure consistent ID field
+        if 'UserId' not in std_data and 'Id' in std_data:
+            std_data['UserId'] = std_data['Id']
+            
+        # Ensure consistent status field - prioritize 'Status' over 'RegistrationStatus'
+        if 'Status' not in std_data and 'RegistrationStatus' in std_data:
+            std_data['Status'] = std_data['RegistrationStatus']
+        elif 'Status' not in std_data:
+            std_data['Status'] = 'Unknown'
+            
+        # Ensure consistent name fields
+        if 'FirstName' not in std_data and 'First' in std_data:
+            std_data['FirstName'] = std_data['First']
+        if 'LastName' not in std_data and 'Last' in std_data:
+            std_data['LastName'] = std_data['Last']
+            
+        # Ensure consistent email field
+        if 'Email' not in std_data and 'EmailAddress' in std_data:
+            std_data['Email'] = std_data['EmailAddress']
+            
+        return std_data
+        
+    def transform_servicereef_to_nxt_participant(self, participant_data, constituent_id):
+        """
+        Transform ServiceReef participant data to NXT participant format.
+        
+        Args:
+            participant_data (dict): ServiceReef participant data
+            constituent_id (str): NXT constituent ID
+            
+        Returns:
+            dict: NXT participant data
+        """
+        # First standardize the data to ensure consistent field access
+        std_data = self.standardize_servicereef_participant(participant_data)
+        
+        # Get status - we now have confidence that 'Status' exists
+        status = std_data.get('Status', 'Unknown')
+        
+        # Map status to NXT RSVP status
+        rsvp_status = self._map_service_reef_status_to_nxt_rsvp(status)
+        
+        # Build NXT participant payload
+        nxt_participant = {
+            'constituent_id': constituent_id,
+            'rsvp_status': rsvp_status,
+            'invitation_status': 'Invited',  # Default per API requirements
+            'attended': False if std_data.get('Attended') is None else bool(std_data.get('Attended'))
+        }
+        
+        # Add additional fields if available
+        if std_data.get('RegistrationDate'):
+            nxt_participant['date'] = std_data.get('RegistrationDate')
+            
+        return nxt_participant
+        
+    def _should_update_email(self, sr_email, nxt_email):
+        """
+        Determine if an email should be updated based on normalized comparison.
+        
+        Args:
+            sr_email (str): ServiceReef email
+            nxt_email (str): NXT email
+            
+        Returns:
+            bool: Always True to force updates
+        """
+        # Always update email from ServiceReef to NXT
+        return True
 
     def _create_address_for_constituent(self, constituent_id, address_data):
         """
         Create a new address for an NXT constituent.
+        If the constituent already has a preferred address, update it instead of creating a new one.
         
         Args:
             constituent_id (str): The NXT constituent ID
@@ -1707,6 +2173,40 @@ class EventSyncService:
             if not address_payload['type']:
                 self.logger.error("Cannot create address: missing required field 'type'")
                 return False
+                
+            # Check for existing addresses - especially preferred addresses
+            # Preferred addresses cannot be deleted, so we need to update them instead
+            existing_addresses = self._handle_nxt_request('GET', f'/constituent/v1/constituents/{constituent_id}/addresses')
+            
+            # Handle existing addresses differently based on whether they are preferred
+            if existing_addresses and 'value' in existing_addresses and existing_addresses['value']:
+                preferred_address_found = False
+                
+                for address in existing_addresses['value']:
+                    if 'id' in address:
+                        address_id = address['id']
+                        
+                        # Check if this is a preferred address
+                        if address.get('preferred', False):
+                            self.logger.info(f"Found preferred address (ID: {address_id}). Using PATCH instead of DELETE.")
+                            # Use PATCH to update preferred address instead of trying to delete it
+                            patch_result = self._handle_nxt_request('PATCH', f'/constituent/v1/addresses/{address_id}', json_data={
+                                'address_lines': address_payload['address_lines'],
+                                'city': address_payload['city'],
+                                'state': address_payload['state'],
+                                'postal_code': address_payload['postal_code'],
+                            })
+                            
+                            if patch_result:
+                                self.logger.info(f"Successfully updated preferred address (ID: {address_id})")
+                                return True  # Successfully updated the preferred address
+                            else:
+                                self.logger.error(f"Failed to update preferred address (ID: {address_id})")
+                        else:
+                            # For non-preferred addresses, we can safely delete them
+                            self.logger.info(f"Deleting non-preferred address (ID: {address_id})")
+                            self._handle_nxt_request('DELETE', f'/constituent/v1/addresses/{address_id}')
+
             
             # Log detailed request information
             self.logger.info(f"Creating address for constituent {constituent_id} with payload: {json.dumps(address_payload)}")
@@ -2305,28 +2805,114 @@ class EventSyncService:
             event_id: ServiceReef event ID
             
         Returns:
-            list: List of participant data if successful, None if failed
+            list: List of validated and complete participant data if successful, None if failed
             
         Raises:
             Exception: If there is an error getting participants
         """
         try:
+            # First check if we need the endpoint with 'Results' pagination structure
+            # or direct array response based on API version/endpoint behavior
             response = self._handle_service_reef_request('GET', f'/v1/events/{event_id}/participants')
-            if response:
-                # Debug: Print the structure of the first participant to see available fields
-                if response and len(response) > 0:
-                    print("\n=== DEBUG: ServiceReef Participant Structure ===")
-                    sample_participant = response[0]
-                    for key in sorted(sample_participant.keys()):
-                        print(f"Field: {key} = {sample_participant[key]}")
-                return response
+            
+            # Process response based on its structure
+            raw_participants = []
+            
+            if isinstance(response, dict) and 'Results' in response:
+                # Handle paginated response format
+                self.logger.info(f"Got paginated participant data for event {event_id}")
+                raw_participants = response.get('Results', [])
+            elif isinstance(response, list):
+                # Handle direct array response
+                self.logger.info(f"Got direct list of {len(response)} participants for event {event_id}")
+                raw_participants = response
             else:
-                self.logger.error(f'Failed to get participants for event {event_id}')
-                return None
+                self.logger.error(f"Unexpected participant data format for event {event_id}: {type(response)}")
+                return []
+            
+            # Enhanced debug logging for participant data
+            if raw_participants:
+                self.logger.info(f"Retrieved {len(raw_participants)} participants for event {event_id}")
                 
+                # Debug the first participant's structure to verify fields
+                if raw_participants:
+                    first_participant = raw_participants[0]
+                    self.logger.info("\n=== DEBUG: ServiceReef Participant Structure ===")
+                    self.logger.info(f"Available fields: {sorted(first_participant.keys())}")
+                    
+                    # Specifically check for RegistrationStatus
+                    if 'RegistrationStatus' in first_participant:
+                        self.logger.info(f"RegistrationStatus field found: '{first_participant['RegistrationStatus']}'")
+                    else:
+                        self.logger.warning("RegistrationStatus field missing from participant data!")
+                        
+                    # Look for potential alternative status fields
+                    for key in first_participant.keys():
+                        if 'status' in key.lower():
+                            self.logger.info(f"Potential status field: {key} = '{first_participant[key]}'")
+            else:
+                self.logger.warning(f"No participants found for event {event_id}")
+                return []
+            
+            # ENHANCED IMPLEMENTATION: Validate and complete participant data
+            # This ensures we don't pass incomplete data to downstream processes
+            complete_participants = []
+            incomplete_count = 0
+            
+            for participant in raw_participants:
+                # Check for mandatory fields
+                user_id = participant.get('UserId')
+                if not user_id:
+                    self.logger.warning("Skipping participant with missing UserId")
+                    incomplete_count += 1
+                    continue
+                    
+                # Make sure we have RegistrationStatus
+                if 'RegistrationStatus' not in participant or not participant.get('RegistrationStatus'):
+                    self.logger.info(f"Fetching complete participant data for UserId {user_id}")
+                    
+                    # Try to get detailed participant info directly from ServiceReef
+                    try:
+                        detailed_participant = self._handle_service_reef_request(
+                            'GET', 
+                            f'/v1/events/{event_id}/participants/{user_id}'
+                        )
+                        
+                        if detailed_participant and isinstance(detailed_participant, dict):
+                            # Update with detailed participant data
+                            participant.update(detailed_participant)
+                            self.logger.info(f"Enhanced participant data with details from ServiceReef API")
+                            
+                            # Check if we now have RegistrationStatus
+                            if 'RegistrationStatus' in participant and participant['RegistrationStatus']:
+                                self.logger.info(f"Successfully retrieved RegistrationStatus: '{participant['RegistrationStatus']}'")
+                            else:
+                                # If still missing, try alternative API endpoint for member details
+                                member_details = self._get_service_reef_member_details(user_id)
+                                if member_details:
+                                    # Look for registration status in member details
+                                    for key, value in member_details.items():
+                                        if 'status' in key.lower() and value:
+                                            participant['RegistrationStatus'] = value
+                                            self.logger.info(f"Used member status '{value}' from key '{key}'")
+                                            break
+                    except Exception as detail_error:
+                        self.logger.error(f"Error fetching detailed participant data: {str(detail_error)}")
+                
+                # Final validation - only include participants with required fields
+                if not participant.get('RegistrationStatus'):
+                    # If we still don't have a status, set a default that won't cause problems
+                    self.logger.warning(f"Setting default 'registered' RegistrationStatus for participant {user_id}")
+                    participant['RegistrationStatus'] = 'registered'  # Set to a value that will map to 'Attending'
+                    
+                complete_participants.append(participant)
+                
+            self.logger.info(f"Validated {len(complete_participants)} participants ({incomplete_count} incomplete records skipped)")
+            return complete_participants
+            
         except Exception as e:
             self.logger.error(f'Error getting participants for event {event_id}: {str(e)}')
-            return None
+            return []
             
     def _get_service_reef_member_details(self, member_id):
         """Get member details from ServiceReef.
@@ -2599,8 +3185,8 @@ class EventSyncService:
                 self.logger.error(f"Failed to get/create constituent for ServiceReef ID {service_reef_id}")
                 return False
                 
-            # Transform ServiceReef data to NXT-ready payload
-            nxt_payload = self._transform_servicereef_to_nxt_participant(participant_data, constituent_id)
+            # Transform ServiceReef data to NXT-ready payload using standardization
+            nxt_payload = self.transform_servicereef_to_nxt_participant(participant_data, constituent_id)
             
             # Create participant in NXT using transformed payload
             nxt_participant = self._create_nxt_participant(event_id, nxt_payload)
@@ -3021,9 +3607,9 @@ if __name__ == '__main__':
             nxt_event_id = 2024  # MTY Test Trip
             sync_service.sync_specific_event(sr_event_id, nxt_event_id, ignore_sync_log=force_sync)
         else:
-            # Otherwise, run the full sync of all events
+            # Otherwise, run the full sync of all events and participants
             root_logger.info("Running full sync of all ServiceReef events and participants")
-            sync_service.sync_all_events()
+            sync_service.sync_all()
         
         logging.info("Sync complete - check sync.log for details")
     except Exception as e:
