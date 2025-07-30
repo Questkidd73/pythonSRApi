@@ -4,6 +4,7 @@ Handles all data transformations, normalizations, and standardizations.
 """
 import logging
 import json
+import os
 from pathlib import Path
 
 class MappingService:
@@ -337,3 +338,75 @@ class MappingService:
             if str(nxt_id) == str(nxt_constituent_id):
                 return sr_id
         return None
+        
+    def add_participant_mapping(self, sr_user_id, nxt_participant_id):
+        """Add a mapping between ServiceReef user ID and NXT participant ID.
+        
+        Args:
+            sr_user_id: ServiceReef user ID
+            nxt_participant_id: NXT participant ID
+        """
+        # Store the mapping in memory
+        if not hasattr(self, 'participant_mapping'):
+            self.participant_mapping = {}
+            
+        self.participant_mapping[str(sr_user_id)] = nxt_participant_id
+        self._save_participant_mapping()
+        
+    def get_nxt_participant_id(self, sr_user_id):
+        """Get NXT participant ID for ServiceReef user ID.
+        
+        Args:
+            sr_user_id: ServiceReef user ID
+            
+        Returns:
+            NXT participant ID or None if not found
+        """
+        if not hasattr(self, 'participant_mapping'):
+            self._load_participant_mapping()
+            
+        return self.participant_mapping.get(str(sr_user_id))
+        
+    def _load_participant_mapping(self):
+        """Load participant mapping from file."""
+        mapping_path = self.config.paths.get('participant_mapping')
+        if not mapping_path:
+            mapping_path = os.path.join(os.path.dirname(self.config.paths['constituent_mapping']), 'participant_mapping.json')
+            
+        self.logger.info(f"Checking participant mapping file at: {mapping_path}")
+        
+        if os.path.exists(mapping_path):
+            try:
+                with open(mapping_path, 'r') as f:
+                    self.participant_mapping = json.load(f)
+                self.logger.debug(f"Loaded {len(self.participant_mapping)} participant mappings")
+            except Exception as e:
+                self.logger.error(f"Error loading participant mapping file: {e}")
+                self.participant_mapping = {}
+        else:
+            self.logger.info("No participant mapping file found, creating new mapping")
+            self.participant_mapping = {}
+            
+            # Create directory if it doesn't exist
+            mapping_dir = os.path.dirname(mapping_path)
+            if not os.path.exists(mapping_dir):
+                os.makedirs(mapping_dir, exist_ok=True)
+                
+            # Create empty mapping file
+            self._save_participant_mapping()
+    
+    def _save_participant_mapping(self):
+        """Save participant mapping to file."""
+        if not hasattr(self, 'participant_mapping'):
+            self.participant_mapping = {}
+            
+        mapping_path = self.config.paths.get('participant_mapping')
+        if not mapping_path:
+            mapping_path = os.path.join(os.path.dirname(self.config.paths['constituent_mapping']), 'participant_mapping.json')
+            
+        try:
+            with open(mapping_path, 'w') as f:
+                json.dump(self.participant_mapping, f, indent=2)
+            self.logger.info(f"Saved {len(self.participant_mapping)} participant mappings")
+        except Exception as e:
+            self.logger.error(f"Error saving participant mapping file: {e}")

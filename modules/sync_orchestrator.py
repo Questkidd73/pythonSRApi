@@ -6,6 +6,7 @@ import logging
 import json
 import os
 from datetime import datetime
+import traceback
 
 from config import Config
 from token_service import ServiceReefTokenService, NXTTokenService
@@ -178,11 +179,16 @@ class SyncOrchestrator:
                 nxt_constituent_id = self._create_nxt_constituent(sr_participant)
                 if not nxt_constituent_id:
                     self.logger.error(f"Failed to create NXT constituent for ServiceReef user {sr_user_id}")
-                    continue
+                    continue  # Skip this participant if constituent creation fails
                     
                 # Add constituent mapping
                 self.mapping_service.add_constituent_mapping(sr_user_id, nxt_constituent_id)
             
+            # Verify we have a valid constituent ID before proceeding
+            if not nxt_constituent_id:
+                self.logger.error(f"No valid NXT constituent ID available for ServiceReef user {sr_user_id}")
+                continue
+                
             # Check if participant exists in NXT event
             existing_participant = self._find_nxt_participant(nxt_participants, nxt_constituent_id)
             
@@ -459,51 +465,100 @@ class SyncOrchestrator:
                 
             # Search for existing constituent by email
             if email:
-                existing = self.nxt_client.search_constituents(email=email)
-                if existing and len(existing) > 0:
-                    nxt_id = existing[0].get('id')
-                    self.logger.info(f"Found existing constituent by email: {nxt_id}")
-                    # Update mapping
-                    self.mapping_service.add_constituent_mapping(service_reef_id, nxt_id)
-                    # Update constituent details if needed
-                    self._update_nxt_constituent(nxt_id, first_name, last_name, email, phone)
-                    return nxt_id
+                try:
+                    self.logger.info(f"Searching for existing constituent by email: {email}")
+                    existing = self.nxt_client.search_constituents(search_text=email)
+                    
+                    # Log the search result for debugging
+                    self.logger.debug(f"Email search result for {email}: {existing}")
+                    
+                    # Validate the search results
+                    if existing and isinstance(existing, (list, tuple)) and len(existing) > 0:
+                        # Get the first valid result with an 'id' field
+                        for result in existing:
+                            if isinstance(result, dict) and 'id' in result:
+                                nxt_id = str(result['id'])  # Ensure ID is a string
+                                self.logger.info(f"Found existing constituent by email: {nxt_id}")
+                                # Update mapping
+                                self.mapping_service.add_constituent_mapping(service_reef_id, nxt_id)
+                                # Update constituent details if needed
+                                self._update_nxt_constituent(nxt_id, first_name, last_name, email, phone)
+                                return nxt_id
+                        
+                        # If we got here, no valid results with 'id' were found
+                        self.logger.warning(f"No valid constituent found in search results for email: {email}")
+                    else:
+                        self.logger.info(f"No existing constituent found with email: {email}")
+                        
+                except Exception as search_error:
+                    self.logger.warning(f"Error searching for constituent by email {email}: {str(search_error)}")
+                    # Continue with creation if search fails
                     
             # Search by name as fallback
             if first_name and last_name:
-                existing = self.nxt_client.search_constituents(first_name=first_name, last_name=last_name)
-                if existing and len(existing) > 0:
-                    # Handle the case where multiple constituents are found
-                    # Log how many were found
-                    if len(existing) > 1:
-                        self.logger.info(f"Found {len(existing)} constituents with name '{first_name} {last_name}'")
-                        # Try to find a better match
-                        best_match = None
-                        for constituent in existing:
-                            # If we have email, prefer constituents with matching email
-                            constituent_email = constituent.get('email', {}).get('address', '')
-                            if email and constituent_email and email.lower() == constituent_email.lower():
-                                best_match = constituent
-                                break
-                        
-                        if best_match:
-                            # Use the best match
-                            nxt_id = best_match.get('id')
-                            self.logger.info(f"Selected best constituent match by email verification: {nxt_id}")
+                try:
+                    search_name = f"{first_name} {last_name}"
+                    self.logger.info(f"Searching for constituent by name: {search_name}")
+                    existing = self.nxt_client.search_constituents(search_text=search_name)
+                    
+                    # Log the search result for debugging
+                    self.logger.debug(f"Name search result for {search_name}: {existing}")
+                    
+                    if existing and isinstance(existing, (list, tuple)) and len(existing) > 0:
+                        # Handle the case where multiple constituents are found
+                        if len(existing) > 1:
+                            self.logger.info(f"Found {len(existing)} constituents with name '{search_name}'")
+                            
+                            # Filter out any invalid results first
+                            valid_results = [r for r in existing if isinstance(r, dict) and 'id' in r]
+                            
+                            if not valid_results:
+                                self.logger.warning("No valid constituents found in search results")
+                            else:
+                                # If we have an email, try to find a match
+                                best_match = None
+                                if email:
+                                    for constituent in valid_results:
+                                        # Handle different possible email field structures
+                                        constituent_email = None
+                                        if 'email' in constituent and isinstance(constituent['email'], dict):
+                                            constituent_email = constituent['email'].get('address', '')
+                                        elif 'email' in constituent and isinstance(constituent['email'], str):
+                                            constituent_email = constituent['email']
+                                            
+                                        if email and constituent_email and email.lower() == constituent_email.lower():
+                                            best_match = constituent
+                                            self.logger.info(f"Found constituent with matching email: {email}")
+                                            break
+                                
+                                # If we found a match by email, use it; otherwise use the first valid result
+                                if best_match:
+                                    nxt_id = str(best_match['id'])
+                                    self.logger.info(f"Selected best constituent match by email verification: {nxt_id}")
+                                else:
+                                    nxt_id = str(valid_results[0]['id'])
+                                    self.logger.info(f"Multiple matches found, using first constituent: {nxt_id}")
+                                
+                                # Update mapping and return the ID
+                                self.mapping_service.add_constituent_mapping(service_reef_id, nxt_id)
+                                self._update_nxt_constituent(nxt_id, first_name, last_name, email, phone)
+                                return nxt_id
                         else:
-                            # Use the first one if no better match
-                            nxt_id = existing[0].get('id')
-                            self.logger.info(f"Multiple matches found, using first constituent: {nxt_id}")
+                            # Single result found
+                            if isinstance(existing[0], dict) and 'id' in existing[0]:
+                                nxt_id = str(existing[0]['id'])
+                                self.logger.info(f"Found existing constituent by name: {nxt_id}")
+                                self.mapping_service.add_constituent_mapping(service_reef_id, nxt_id)
+                                self._update_nxt_constituent(nxt_id, first_name, last_name, email, phone)
+                                return nxt_id
+                            else:
+                                self.logger.warning("Invalid constituent data in search results")
                     else:
-                        # Just one match found
-                        nxt_id = existing[0].get('id')
-                        self.logger.info(f"Found existing constituent by name: {nxt_id}")
+                        self.logger.info(f"No existing constituent found with name: {search_name}")
                         
-                    # Update mapping
-                    self.mapping_service.add_constituent_mapping(service_reef_id, nxt_id)
-                    # Update constituent details if needed
-                    self._update_nxt_constituent(nxt_id, first_name, last_name, email, phone)
-                    return nxt_id
+                except Exception as name_search_error:
+                    self.logger.warning(f"Error searching for constituent by name: {str(name_search_error)}")
+                    # Continue with creation if search fails
                     
             # No existing constituent found, create new one
             constituent_data = {
@@ -520,22 +575,75 @@ class SyncOrchestrator:
             if phone:
                 constituent_data['phone'] = self.mapping_service.create_nxt_phone_payload(phone)
                 
-            # Create constituent in NXT
-            response = self.nxt_client.create_constituent(constituent_data)
-            if not response or 'id' not in response:
-                self.logger.error(f"Failed to create NXT constituent: {response}")
+            # Create constituent in NXT with enhanced error handling
+            try:
+                self.logger.info(f"Attempting to create NXT constituent with data: {json.dumps(constituent_data, indent=2)}")
+                response = self.nxt_client.create_constituent(constituent_data)
+                
+                if not response:
+                    self.logger.error("Failed to create NXT constituent: Empty response from API")
+                    return None
+                    
+                if 'id' not in response:
+                    self.logger.error(f"Failed to create NXT constituent. Response missing 'id' field. Full response: {json.dumps(response, indent=2)}")
+                    return None
+                    
+                nxt_id = str(response['id'])  # Ensure ID is a string
+                self.logger.info(f"Successfully created NXT constituent {nxt_id} for ServiceReef user {service_reef_id}")
+                
+                # Save mapping
+                self.mapping_service.add_constituent_mapping(service_reef_id, nxt_id)
+                return nxt_id
+                
+            except Exception as api_error:
+                self.logger.error(f"API Error in _create_nxt_constituent: {str(api_error)}")
+                self.logger.error(f"Error type: {type(api_error).__name__}")
+                if hasattr(api_error, 'response') and hasattr(api_error.response, 'text'):
+                    self.logger.error(f"API Response: {api_error.response.text}")
                 return None
                 
-            nxt_id = response['id']
-            self.logger.info(f"Created NXT constituent {nxt_id} for ServiceReef user {service_reef_id}")
-            
-            # Save mapping
-            self.mapping_service.add_constituent_mapping(service_reef_id, nxt_id)
-            return nxt_id
-                
         except Exception as e:
-            self.logger.error(f"Error in _create_nxt_constituent: {str(e)}")
+            self.logger.error(f"Unexpected error in _create_nxt_constituent: {str(e)}")
+            self.logger.error(traceback.format_exc())
             return None
+            
+    def _create_nxt_participant(self, nxt_event_id, nxt_constituent_id, sr_participant):
+        """Create a new participant in NXT event.
+        
+        Args:
+            nxt_event_id: NXT event ID
+            nxt_constituent_id: NXT constituent ID
+            sr_participant: ServiceReef participant data
+            
+        Returns:
+            bool: True if participant was created successfully, False otherwise
+        """
+        try:
+            # Transform ServiceReef participant data to NXT format
+            participant_data = self._transform_servicereef_to_nxt_participant(sr_participant, nxt_constituent_id)
+            if not participant_data:
+                self.logger.error(f"Failed to transform participant data for NXT constituent {nxt_constituent_id}")
+                return False
+                
+            self.logger.info(f"Creating NXT participant for event {nxt_event_id}, constituent {nxt_constituent_id}")
+            self.logger.debug(f"NXT participant data: {json.dumps(participant_data, indent=2, default=str)}")
+            
+            # Create participant in NXT
+            response = self.nxt_client.create_event_participant(nxt_event_id, participant_data)
+            
+            if not response or 'id' not in response:
+                self.logger.error(f"Failed to create participant in NXT: {response}")
+                return False
+                
+            self.logger.info(f"Successfully created NXT participant {response['id']} for constituent {nxt_constituent_id}")
+            return True
+            
+        except Exception as e:
+            self.logger.error(f"Error creating NXT participant: {str(e)}")
+            self.logger.error(f"Error type: {type(e).__name__}")
+            if hasattr(e, 'response') and hasattr(e.response, 'text'):
+                self.logger.error(f"API Response: {e.response.text}")
+            return False
             
     def _update_nxt_constituent(self, nxt_id, first_name, last_name, email, phone):
         """Update an existing constituent in NXT if ServiceReef data has changed.
